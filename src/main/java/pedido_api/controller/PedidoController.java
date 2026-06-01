@@ -24,6 +24,11 @@ public class PedidoController {
         return pedidoService.concluir(id);
     }
 
+    @PutMapping("/{id}/cancelar")
+    public PedidoDTO cancelar(@PathVariable Long id) {
+        return pedidoService.cancelar(id);
+    }
+
     @GetMapping("/cliente/{clienteId}")
     public List<PedidoDTO> listarPorCliente(@PathVariable Long clienteId) {
         return pedidoService.listarPorCliente(clienteId);
