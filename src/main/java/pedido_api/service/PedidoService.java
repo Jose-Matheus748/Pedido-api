@@ -1,16 +1,21 @@
 package pedido_api.service;
 
-import org.springframework.beans.factory.annotation.Value;
-import pedido_api.client.StockPlusClient;
-import pedido_api.dto.PedidoDTO;
-import pedido_api.entity.*;
-import pedido_api.repository.PedidoRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
+import pedido_api.client.StockPlusClient;
+import pedido_api.dto.PedidoDTO;
+import pedido_api.dto.ProtocoloPedidoDTO;
+import pedido_api.entity.ItemPedido;
+import pedido_api.entity.Pedido;
+import pedido_api.entity.StatusPedido;
+import pedido_api.repository.PedidoRepository;
 
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -18,78 +23,40 @@ public class PedidoService {
 
     private final StockPlusClient stockPlusClient;
     private final PedidoRepository pedidoRepository;
-    private final RestTemplate restTemplate;
-
-    @Value("${estoque.api.url}")
-    private String estoqueApiUrl;
-
-
 
     public PedidoDTO criar(PedidoDTO dto) {
+        validarProtocolos(dto.getProtocoloIds());
+
         Pedido pedido = new Pedido();
         pedido.setClienteId(dto.getClienteId());
         pedido.setLojaId(dto.getLojaId());
-        pedido.setProtocoloId(dto.getProtocoloId());
         pedido.setStatus(StatusPedido.EM_ANDAMENTO);
         pedido.setDataCriacao(LocalDateTime.now());
+
+        for (Long protocoloId : dto.getProtocoloIds()) {
+            pedido.getItens().add(criarItem(pedido, protocoloId));
+        }
 
         return toDTO(pedidoRepository.save(pedido));
     }
 
     public PedidoDTO concluir(Long id) {
-        Pedido pedido = pedidoRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Pedido não encontrado"));
+        Pedido pedido = buscarPedido(id);
 
-        if (pedido.getStatus() == StatusPedido.CONCLUIDO) {
-            throw new RuntimeException("Pedido já foi concluído");
-        }
-
-        if (pedido.getStatus() == StatusPedido.CANCELADO) {
-            throw new RuntimeException("Pedido cancelado não pode ser concluído");
-        }
-
-        baixarEstoque(pedido.getProtocoloId());
+        validarPodeConcluir(pedido);
+        stockPlusClient.baixarEstoque(getProtocoloIds(pedido));
 
         pedido.setStatus(StatusPedido.CONCLUIDO);
         return toDTO(pedidoRepository.save(pedido));
     }
 
     public PedidoDTO cancelar(Long id) {
-        Pedido pedido = pedidoRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Pedido não encontrado"));
+        Pedido pedido = buscarPedido(id);
 
-        if (pedido.getStatus() == StatusPedido.CONCLUIDO) {
-            throw new RuntimeException("Pedido já concluído não pode ser cancelado");
-        }
-
-        if (pedido.getStatus() == StatusPedido.CANCELADO) {
-            throw new RuntimeException("Pedido já foi cancelado");
-        }
-
+        validarPodeCancelar(pedido);
         pedido.setStatus(StatusPedido.CANCELADO);
+
         return toDTO(pedidoRepository.save(pedido));
-    }
-
-    private void baixarEstoque(Long protocoloId) {
-        Map<String, Object> body = new HashMap<>();
-        body.put("protocoloId", protocoloId);
-
-        try {
-            restTemplate.postForObject(estoqueApiUrl, body, Void.class);
-        } catch (org.springframework.web.client.HttpClientErrorException e) {
-            try {
-                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                Map<?, ?> errorBody = mapper.readValue(e.getResponseBodyAsString(), Map.class);
-                String mensagem = (String) errorBody.get("message");
-                throw new RuntimeException(mensagem != null ? mensagem : "Erro ao baixar estoque");
-            } catch (RuntimeException re) {
-                throw re;
-            } catch (Exception ex) {
-                throw new RuntimeException("Erro ao baixar estoque");
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("Erro ao comunicar com o serviço de estoque: " + e.getMessage());
-        }
     }
 
     public List<PedidoDTO> listarPorCliente(Long clienteId) {
@@ -108,25 +75,95 @@ public class PedidoService {
 
     private PedidoDTO toDTO(Pedido pedido) {
         String nomeCliente = stockPlusClient.getNomeCliente(pedido.getClienteId());
-        String nomeLoja    = stockPlusClient.getNomeLoja(pedido.getLojaId());
-        StockPlusClient.ProtocoloResponse protocolo = stockPlusClient.getProtocolo(pedido.getProtocoloId());
+        String nomeLoja = stockPlusClient.getNomeLoja(pedido.getLojaId());
+        List<Long> protocoloIds = getProtocoloIds(pedido);
+
+        Map<Long, StockPlusClient.ProtocoloResponse> protocolosPorId =
+                stockPlusClient.getProtocolos(protocoloIds)
+                        .stream()
+                        .filter(protocolo -> protocolo.getId() != null)
+                        .collect(Collectors.toMap(
+                                StockPlusClient.ProtocoloResponse::getId,
+                                Function.identity(),
+                                (primeiro, repetido) -> primeiro
+                        ));
+
+        List<ProtocoloPedidoDTO> protocolos = protocoloIds.stream()
+                .map(protocoloId -> {
+                    StockPlusClient.ProtocoloResponse protocolo = protocolosPorId.get(protocoloId);
+
+                    return new ProtocoloPedidoDTO(
+                            protocoloId,
+                            protocolo != null ? protocolo.getNome() : "Protocolo removido",
+                            protocolo != null ? protocolo.getPreco() : 0.0
+                    );
+                })
+                .toList();
+
+        double valorTotal = protocolos.stream()
+                .mapToDouble(protocolo -> protocolo.getValorTotal() != null ? protocolo.getValorTotal() : 0.0)
+                .sum();
 
         return new PedidoDTO(
                 pedido.getId(),
-
                 pedido.getClienteId(),
                 nomeCliente,
-
                 pedido.getLojaId(),
                 nomeLoja,
-
-                pedido.getProtocoloId(),
-                protocolo != null ? protocolo.getNome() : "Protocolo removido",
-
-                protocolo != null ? protocolo.getPreco() : 0.0,
-
+                protocoloIds,
+                protocolos,
+                valorTotal,
                 pedido.getStatus().name(),
                 pedido.getDataCriacao()
         );
+    }
+
+    private Pedido buscarPedido(Long id) {
+        return pedidoRepository.findByIdWithItens(id)
+                .orElseThrow(() -> new RuntimeException("Pedido nao encontrado"));
+    }
+
+    private void validarProtocolos(List<Long> protocoloIds) {
+        if (protocoloIds == null || protocoloIds.isEmpty()) {
+            throw new RuntimeException("Pedido deve conter pelo menos um protocolo");
+        }
+
+        if (protocoloIds.stream().anyMatch(Objects::isNull)) {
+            throw new RuntimeException("Pedido possui protocolo invalido");
+        }
+    }
+
+    private void validarPodeConcluir(Pedido pedido) {
+        if (pedido.getStatus() == StatusPedido.CONCLUIDO) {
+            throw new RuntimeException("Pedido ja foi concluido");
+        }
+
+        if (pedido.getStatus() == StatusPedido.CANCELADO) {
+            throw new RuntimeException("Pedido cancelado nao pode ser concluido");
+        }
+    }
+
+    private void validarPodeCancelar(Pedido pedido) {
+        if (pedido.getStatus() == StatusPedido.CONCLUIDO) {
+            throw new RuntimeException("Pedido ja concluido nao pode ser cancelado");
+        }
+
+        if (pedido.getStatus() == StatusPedido.CANCELADO) {
+            throw new RuntimeException("Pedido ja foi cancelado");
+        }
+    }
+
+    private ItemPedido criarItem(Pedido pedido, Long protocoloId) {
+        ItemPedido item = new ItemPedido();
+        item.setPedido(pedido);
+        item.setProtocoloId(protocoloId);
+        return item;
+    }
+
+    private List<Long> getProtocoloIds(Pedido pedido) {
+        return pedido.getItens()
+                .stream()
+                .map(ItemPedido::getProtocoloId)
+                .toList();
     }
 }
