@@ -3,6 +3,7 @@ package pedido_api.dto;
 import lombok.*;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Getter
 @Setter
@@ -18,8 +19,8 @@ public class PedidoDTO {
     private Long lojaId;
     private String lojaNome;
 
-    private Long protocoloId;
-    private String protocoloNome;
+    private List<Long> protocoloIds;
+    private List<ProtocoloPedidoDTO> protocolos;
 
     private Double valorTotal;
 

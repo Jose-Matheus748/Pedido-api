@@ -1,9 +1,17 @@
 package pedido_api.client;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
+
+import java.net.URI;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 
 @Component
 @RequiredArgsConstructor
@@ -13,6 +21,9 @@ public class StockPlusClient {
 
     @Value("${stockplus.api.url}")
     private String baseUrl;
+
+    @Value("${estoque.api.url}")
+    private String estoqueApiUrl;
 
     public String getNomeCliente(Long clienteId) {
         try {
@@ -35,11 +46,53 @@ public class StockPlusClient {
     }
 
     public ProtocoloResponse getProtocolo(Long protocoloId) {
-        try {
-            return restTemplate.getForObject(
-                    baseUrl + "/protocolos/" + protocoloId, ProtocoloResponse.class);
-        } catch (Exception e) {
+        if (protocoloId == null) {
             return null;
+        }
+
+        return getProtocolos(List.of(protocoloId))
+                .stream()
+                .findFirst()
+                .orElse(null);
+    }
+
+    public List<ProtocoloResponse> getProtocolos(List<Long> protocoloIds) {
+        if (protocoloIds == null || protocoloIds.isEmpty()) {
+            return List.of();
+        }
+
+        try {
+            URI uri = UriComponentsBuilder.fromUriString(baseUrl + "/protocolos/lote")
+                    .queryParam("ids", protocoloIds.toArray())
+                    .build()
+                    .toUri();
+
+            ProtocoloResponse[] response = restTemplate.getForObject(uri, ProtocoloResponse[].class);
+            return response != null ? Arrays.asList(response) : List.of();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
+    public void baixarEstoque(List<Long> protocoloIds) {
+        try {
+            restTemplate.postForObject(estoqueApiUrl, Map.of("protocoloIds", protocoloIds), Void.class);
+        } catch (HttpClientErrorException e) {
+            throw new RuntimeException(extrairMensagemErro(e, "Erro ao baixar estoque"));
+        } catch (Exception e) {
+            throw new RuntimeException("Erro ao comunicar com o servico de estoque: " + e.getMessage());
+        }
+    }
+
+    private String extrairMensagemErro(HttpClientErrorException e, String fallback) {
+        try {
+            ObjectMapper objectMapper = new ObjectMapper();
+            Map<?, ?> errorBody = objectMapper.readValue(e.getResponseBodyAsString(), Map.class);
+            Object mensagem = errorBody.get("message");
+
+            return mensagem instanceof String texto && !texto.isBlank() ? texto : fallback;
+        } catch (Exception ex) {
+            return fallback;
         }
     }
 

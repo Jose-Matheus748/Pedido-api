@@ -4,6 +4,8 @@ import jakarta.persistence.*;
 import lombok.*;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "pedidos")
@@ -17,7 +19,9 @@ public class Pedido {
 
     private Long clienteId;
     private Long lojaId;
-    private Long protocoloId;
+
+    @OneToMany(mappedBy = "pedido", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<ItemPedido> itens = new ArrayList<>();
 
     @Enumerated(EnumType.STRING)
     private StatusPedido status;
